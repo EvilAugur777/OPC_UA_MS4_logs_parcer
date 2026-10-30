@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace OpcUaLogAnalyzer
@@ -50,18 +52,17 @@ namespace OpcUaLogAnalyzer
 			}
 			maxFileNameLength += 2;
 
-			// Сузил колонки с числами до 15 символов, так как теперь они короткие
-			string headerFormat = $"{{0,-{maxFileNameLength}}} | {{1,10}} | {{2,15}} | {{3,15}} | {{4,15}} | {{5,15}}";
-			string header = string.Format(headerFormat, "Файл", "Записей", "Среднее items", "Мин items", "Ср. за 100мс", "Мин за 100мс");
+			// Добавили новые колонки в заголовок. Сделал их чуть уже, чтобы всё влезло в экран.
+			string headerFormat = $"{{0,-{maxFileNameLength}}} | {{1,6}} | {{2,10}} | {{3,10}} | {{4,10}} | {{5,10}} | {{6,12}} | {{7,12}}";
+			string header = string.Format(headerFormat, "Файл", "Записей", "Ср. items", "Мин items", "Ср. 100мс", "Мин 100мс", "Медиана (10%)", "Мед. за 100мс");
 
 			Console.WriteLine(header);
 			Console.WriteLine(new string('-', header.Length));
 
 			foreach (var file in logFiles)
 			{
-				long count = 0;
-				double sum = 0;
-				long min = long.MaxValue;
+				// Теперь сохраняем все значения в список для подсчета медианы
+				List<long> itemsList = new List<long>();
 
 				using (var reader = new StreamReader(file, System.Text.Encoding.UTF8))
 				{
@@ -75,9 +76,7 @@ namespace OpcUaLogAnalyzer
 							{
 								if (itemsVal > 0)
 								{
-									count++;
-									sum += itemsVal;
-									if (itemsVal < min) min = itemsVal;
+									itemsList.Add(itemsVal);
 								}
 							}
 						}
@@ -86,29 +85,64 @@ namespace OpcUaLogAnalyzer
 
 				string fileName = Path.GetFileName(file);
 
-				if (count > 0)
+				if (itemsList.Count > 0)
 				{
+					long count = itemsList.Count;
+
+					// 1. Обычное среднее
+					double sum = 0;
+					foreach (var val in itemsList) sum += val;
 					double avg = sum / count;
+
+					// 2. Минимум
+					long min = itemsList.Min();
+
+					// 3. Усеченное среднее (Медиана 10%)
+					double truncatedMean = CalculateTruncatedMean(itemsList, 0.10);
+
+					// Пересчет на 100мс
 					double avgPer100ms = avg / 600.0;
 					double minPer100ms = min / 600.0;
+					double truncatedPer100ms = truncatedMean / 600.0;
 
-					// ИЗМЕНЕНИЕ: передаем строки, явно форматируя их через "F0" (0 знаков после запятой)
+					// Округляем до целых при выводе (F0)
 					Console.WriteLine(string.Format(headerFormat,
 						fileName,
 						count,
 						$"{avg:F0}",
 						min,
 						$"{avgPer100ms:F0}",
-						$"{minPer100ms:F0}"));
+						$"{minPer100ms:F0}",
+						$"{truncatedMean:F0}",
+						$"{truncatedPer100ms:F0}"));
 				}
 				else
 				{
-					Console.WriteLine(string.Format(headerFormat, fileName, 0, "-", "-", "-", "-"));
+					Console.WriteLine(string.Format(headerFormat, fileName, 0, "-", "-", "-", "-", "-", "-"));
 				}
 			}
 
 			Console.WriteLine("\nГотово. Нажмите любую клавишу для выхода...");
 			Console.ReadKey();
+		}
+
+		// Функция для расчета усеченного среднего (отбрасываем по 10% с начала и конца)
+		static double CalculateTruncatedMean(List<long> values, double trimPercent)
+		{
+			// Сортируем список по возрастанию
+			var sorted = values.OrderBy(x => x).ToList();
+
+			// Вычисляем, сколько элементов нужно отбросить с каждой стороны
+			int trimCount = (int)(sorted.Count * trimPercent);
+
+			// Берем только среднюю часть (80%)
+			var trimmedList = sorted.Skip(trimCount).Take(sorted.Count - (trimCount * 2)).ToList();
+
+			// Если файл настолько мал, что после обрезки ничего не осталось, возвращаем обычное среднее
+			if (trimmedList.Count == 0)
+				return sorted.Average();
+
+			return trimmedList.Average();
 		}
 	}
 }
