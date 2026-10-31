@@ -2,10 +2,24 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace OpcUaLogAnalyzer
 {
+	// Структура для хранения результатов анализа, чтобы не читать файлы с диска дважды
+	struct LogReport
+	{
+		public string FileName;
+		public long Count;
+		public string AvgItems;
+		public long MinItems;
+		public string Avg100ms;
+		public string Min100ms;
+		public string TruncatedMean;
+		public string TruncatedPer100ms;
+	}
+
 	class Program
 	{
 		static readonly Regex LogRegex = new Regex(
@@ -52,16 +66,17 @@ namespace OpcUaLogAnalyzer
 			}
 			maxFileNameLength += 2;
 
-			// Добавили новые колонки в заголовок. Сделал их чуть уже, чтобы всё влезло в экран.
 			string headerFormat = $"{{0,-{maxFileNameLength}}} | {{1,6}} | {{2,10}} | {{3,10}} | {{4,10}} | {{5,10}} | {{6,12}} | {{7,12}}";
 			string header = string.Format(headerFormat, "Файл", "Записей", "Ср. items", "Мин items", "Ср. 100мс", "Мин 100мс", "Медиана (10%)", "Мед. за 100мс");
 
 			Console.WriteLine(header);
 			Console.WriteLine(new string('-', header.Length));
 
+			// Список для хранения отчетов по каждому файлу
+			var reportsList = new List<LogReport>();
+
 			foreach (var file in logFiles)
 			{
-				// Теперь сохраняем все значения в список для подсчета медианы
 				List<long> itemsList = new List<long>();
 
 				using (var reader = new StreamReader(file, System.Text.Encoding.UTF8))
@@ -89,23 +104,19 @@ namespace OpcUaLogAnalyzer
 				{
 					long count = itemsList.Count;
 
-					// 1. Обычное среднее
 					double sum = 0;
 					foreach (var val in itemsList) sum += val;
 					double avg = sum / count;
 
-					// 2. Минимум
 					long min = itemsList.Min();
 
-					// 3. Усеченное среднее (Медиана 10%)
 					double truncatedMean = CalculateTruncatedMean(itemsList, 0.10);
 
-					// Пересчет на 100мс
 					double avgPer100ms = avg / 600.0;
 					double minPer100ms = min / 600.0;
 					double truncatedPer100ms = truncatedMean / 600.0;
 
-					// Округляем до целых при выводе (F0)
+					// Выводим данные в консоль
 					Console.WriteLine(string.Format(headerFormat,
 						fileName,
 						count,
@@ -115,30 +126,95 @@ namespace OpcUaLogAnalyzer
 						$"{minPer100ms:F0}",
 						$"{truncatedMean:F0}",
 						$"{truncatedPer100ms:F0}"));
+
+					// Сохраняем в список для CSV
+					reportsList.Add(new LogReport
+					{
+						FileName = fileName,
+						Count = count,
+						AvgItems = avg.ToString("F0"),
+						MinItems = min,
+						Avg100ms = avgPer100ms.ToString("F0"),
+						Min100ms = minPer100ms.ToString("F0"),
+						TruncatedMean = truncatedMean.ToString("F0"),
+						TruncatedPer100ms = truncatedPer100ms.ToString("F0")
+					});
 				}
 				else
 				{
 					Console.WriteLine(string.Format(headerFormat, fileName, 0, "-", "-", "-", "-", "-", "-"));
+
+					reportsList.Add(new LogReport
+					{
+						FileName = fileName,
+						Count = 0,
+						AvgItems = "-",
+						MinItems = 0,
+						Avg100ms = "-",
+						Min100ms = "-",
+						TruncatedMean = "-",
+						TruncatedPer100ms = "-"
+					});
 				}
 			}
+
+			// Логика запроса сохранения в CSV
+			Console.Write("\nСохранить отчет в CSV? [y/N] (по умолчанию: No): ");
+			string saveChoice = Console.ReadLine()?.Trim().ToLower();
+
+			if (saveChoice == "y" || saveChoice == "yes")
+			{
+				try
+				{
+					string csvPath = Path.Combine(folderPath, $"report_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
+
+					using (var writer = new StreamWriter(csvPath, false, new UTF8Encoding(true)))
+					{
+						writer.WriteLine("Файл;Записей;Ср. items;Мин items;Ср. 100мс;Мин 100мс;Медиана (10%);Мед. за 100мс");
+
+						foreach (var rep in reportsList)
+						{
+							string minValStr = rep.Count > 0 ? rep.MinItems.ToString() : "-";
+							string min100Str = rep.Count > 0 ? rep.Min100ms : "-";
+
+							writer.WriteLine($"{rep.FileName};{rep.Count};{rep.AvgItems};{minValStr};{rep.Avg100ms};{min100Str};{rep.TruncatedMean};{rep.TruncatedPer100ms}");
+						}
+					}
+
+					Console.WriteLine($"[Успех] Отчет успешно сохранен в: {csvPath}");
+
+					// НОВАЯ ЛОГИКА: Вопрос об открытии файла
+					Console.Write("Открыть созданный отчет? [y/N] (по умолчанию: No): ");
+					string openChoice = Console.ReadLine()?.Trim().ToLower();
+
+					if (openChoice == "y" || openChoice == "yes")
+					{
+						// Используем ProcessStartInfo с UseShellExecute = true, 
+						// чтобы Windows сама открыла файл в программе по умолчанию (Excel, Блокнот и т.д.)
+						System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+						{
+							FileName = csvPath,
+							UseShellExecute = true
+						});
+					}
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"[Ошибка] Не удалось обработать файл: {ex.Message}");
+				}
+			}
+
 
 			Console.WriteLine("\nГотово. Нажмите любую клавишу для выхода...");
 			Console.ReadKey();
 		}
 
-		// Функция для расчета усеченного среднего (отбрасываем по 10% с начала и конца)
 		static double CalculateTruncatedMean(List<long> values, double trimPercent)
 		{
-			// Сортируем список по возрастанию
 			var sorted = values.OrderBy(x => x).ToList();
-
-			// Вычисляем, сколько элементов нужно отбросить с каждой стороны
 			int trimCount = (int)(sorted.Count * trimPercent);
-
-			// Берем только среднюю часть (80%)
 			var trimmedList = sorted.Skip(trimCount).Take(sorted.Count - (trimCount * 2)).ToList();
 
-			// Если файл настолько мал, что после обрезки ничего не осталось, возвращаем обычное среднее
 			if (trimmedList.Count == 0)
 				return sorted.Average();
 
